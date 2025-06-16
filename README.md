@@ -10,6 +10,7 @@ This guide covers best practices for developing Next.js 14 applications that mu
 
 ---
 
+
 ## Project Structure
 ```text
 my-nextjs-app/
@@ -23,10 +24,10 @@ my-nextjs-app/
 │       └── env.d.ts      # Environment variable types
 ├── docker/
 │   ├── Dockerfile.dev
-│   └── Dockerfile.prod
-├── docker-compose.yml
-├── docker-compose.dev.yml
-├── docker-compose.prod.yml
+│   ├── Dockerfile.prod
+│   ├── docker-compose.yml
+│   ├── docker-compose.dev.yml
+│   └── docker-compose.prod.yml
 ├── .env.local
 ├── .env.development
 ├── .env.production
@@ -34,6 +35,7 @@ my-nextjs-app/
 ├── package.json
 └── pnpm-lock.yaml
 ```
+
 
 ---
 
@@ -76,6 +78,17 @@ Add or rename a variable → update **both** the declaration file *and* every re
 * `.env.local` – localhost values  
 * `.env.development` – containerised‑dev; server variables use Docker DNS names  
 * `.env.production` – production; server variables use Docker DNS, client variables use public URLs
+
+**Add `.env` files to Git ignore**
+
+```gitignore
+# Local and per‑environment secrets
+.env.local
+.env.development
+.env.production
+```
+
+Commit a **sanitised** `\.env.example` to document required variables while keeping real credentials out of version control.
 
 ### 2 Build‑time vs run‑time values
 
@@ -160,6 +173,18 @@ export default nextConfig;
 ---
 
 ## Docker Configuration
+
+
+### Why three Docker Compose files?
+
+| File | Role |
+|------|------|
+| **docker/docker-compose.yml** | *Base layer* – defines shared infrastructure (e.g., the database volume). |
+| **docker/docker-compose.dev.yml** | Development overrides: mounts source code, exposes extra ports, uses dev images. |
+| **docker/docker-compose.prod.yml** | Production overrides: runs the optimised images, enables an Nginx reverse‑proxy, detached mode by default. |
+
+`docker-compose` lets you stack files with `-f file1 -f file2 …`; later files override or extend keys from earlier ones. That makes it possible to **build once** and **run with environment‑specific tweaks** without duplicating the entire compose file.
+
 
 ### docker/Dockerfile.dev
 ```dockerfile
@@ -278,7 +303,7 @@ services:
 
   postgres:
     extends:
-      file: docker-compose.yml
+      file: docker/docker-compose.yml
       service: postgres
 
 volumes:
@@ -318,7 +343,7 @@ services:
 
   postgres:
     extends:
-      file: docker-compose.yml
+      file: docker/docker-compose.yml
       service: postgres
 
   nginx:
@@ -356,9 +381,9 @@ volumes:
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
-    "docker:dev": "docker-compose -f docker-compose.yml -f docker-compose.dev.yml up",
-    "docker:prod": "docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d",
-    "docker:build": "docker-compose -f docker-compose.yml -f docker-compose.prod.yml build"
+    "docker:dev": "docker-compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up",
+    "docker:prod": "docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d",
+    "docker:build": "docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml build"
   },
   "dependencies": {
     "next": "14.2.0",
@@ -392,13 +417,12 @@ volumes:
 pnpm dev
 
 # Local with Docker services
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up postgres api-service
+docker-compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up postgres api-service
 pnpm dev
 
 # Full containerised development
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+docker-compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up
 
 # Production
-docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
 ```
-
