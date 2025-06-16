@@ -362,9 +362,243 @@ volumes:
 
 ---
 
+
 ## API Integration
 
-*(The API client, cache utilities, route examples and React components are unchanged from the original guide and remain valid; include them here as‑is.)*
+### 1 Type-safe Response Models
+
+`src/types/api.ts`
+
+```typescript
+// User
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateUserRequest {
+  name: string;
+  email: string;
+  password: string;
+}
+
+// Product
+export interface Product {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  categoryId: string;
+  imageUrl?: string;
+  inStock: boolean;
+}
+
+// Auth
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: User;
+  expiresAt: string;
+}
+
+// Generic wrappers
+export interface ApiError {
+  message: string;
+  code?: string;
+  details?: Record<string, any>;
+}
+
+export interface ApiResponse<T> {
+  data: T;
+  success: boolean;
+  message?: string;
+}
+```
+
+---
+
+### 2 Centralised API Client (`src/lib/api-client.ts`)
+
+* Chooses **internal** URLs on the server and **public** URLs on the client.
+* Implements intelligent caching (Next 14 `revalidate`, tag-based invalidation).
+* Callers can force `cache: 'no-store'`.
+
+```typescript
+const isServer = typeof window === 'undefined';
+
+const getBaseUrl = (svc: string) =>
+  isServer
+    ? {
+        api:  process.env.INTERNAL_API_BASE_URL  ?? process.env.NEXT_PUBLIC_API_BASE_URL!,
+        user: process.env.INTERNAL_USER_SERVICE_URL ?? process.env.NEXT_PUBLIC_USER_SERVICE_URL!,
+        auth: process.env.INTERNAL_AUTH_SERVICE_URL ?? process.env.NEXT_PUBLIC_AUTH_SERVICE_URL!,
+      }[svc]!
+    : {
+        api:  process.env.NEXT_PUBLIC_API_BASE_URL!,
+        user: process.env.NEXT_PUBLIC_USER_SERVICE_URL!,
+        auth: process.env.NEXT_PUBLIC_AUTH_SERVICE_URL!,
+      }[svc]!;
+
+const cfg = {
+  cacheable: {
+    user: { revalidate: 3600 },
+    products: { revalidate: 1800 },
+    categories: { revalidate: 7200 },
+    config: { revalidate: 86400 },
+  },
+  noCacheEndpoints: ['/auth', '/orders', '/payments', '/analytics', '/notifications', '/real-time'],
+  noCacheServices: ['auth', 'payment', 'analytics'],
+};
+
+const shouldCache = (svc: string, ep: string) =>
+  !cfg.noCacheServices.includes(svc) && !cfg.noCacheEndpoints.some((p) => ep.includes(p));
+
+const cacheOpt = (svc: string, ep: string, m = 'GET') =>
+  m !== 'GET' || !shouldCache(svc, ep)
+    ? { cache: 'no-store' as const }
+    : { next: { revalidate: cfg.cacheable[svc]?.revalidate ?? 300, tags: [`${svc}-${ep.split('/')[1] || 'default'}`] } };
+
+interface Opt { cache?: boolean }
+
+export const apiClient = {
+  async get<T>(svc: string, ep: string, o?: Opt): Promise<T> {
+    const res = await fetch(`${getBaseUrl(svc)}${ep}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      ...(o?.cache === false ? { cache: 'no-store' } : cacheOpt(svc, ep)),
+    });
+    if (!res.ok) throw new Error(`GET ${ep} failed ${res.status}`);
+    return res.json();
+  },
+  async post<T>(svc: string, ep: string, body: any): Promise<T> {
+    const res = await fetch(`${getBaseUrl(svc)}${ep}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(`POST ${ep} failed ${res.status}`);
+    return res.json();
+  },
+  async put<T>(svc: string, ep: string, body: any): Promise<T> {
+    const res = await fetch(`${getBaseUrl(svc)}${ep}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(`PUT ${ep} failed ${res.status}`);
+    return res.json();
+  },
+  async delete<T>(svc: string, ep: string): Promise<T> {
+    const res = await fetch(`${getBaseUrl(svc)}${ep}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(`DELETE ${ep} failed ${res.status}`);
+    return res.json();
+  },
+};
+```
+
+---
+
+### 3 Cache Invalidation Helpers (`src/lib/cache-utils.ts`)
+
+```typescript
+import { revalidateTag, revalidatePath } from 'next/cache';
+
+export const cacheUtils = {
+  revalidateService: (svc: string, ep?: string) =>
+    revalidateTag(ep ? `${svc}-${ep.split('/')[1] || 'default'}` : `${svc}-default`),
+  revalidateUserData: () =>
+    ['user-users', 'user-profile', 'user-preferences'].forEach(revalidateTag),
+  revalidateProducts: () =>
+    ['products-list', 'products-categories', 'categories-default'].forEach(revalidateTag),
+  revalidatePagePath: (p: string) => revalidatePath(p),
+};
+```
+
+---
+
+### 4 API Route vs Rewrite — decision matrix
+
+| Use an **API Route** when … | Use a **Rewrite** when … |
+|-----------------------------|--------------------------|
+| Data transformation / merging is required | Backend already returns the needed payload |
+| Auth or role checks are needed | Backend handles auth itself |
+| You need cache tags / invalidation | Backend sets cache headers |
+| You want full TypeScript typing in the route | Contract already typed downstream |
+
+---
+
+### 5 Example cached route
+
+```typescript
+// src/app/api/users/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { apiClient } from '@/lib/api-client';
+import type { User, CreateUserRequest, ApiResponse } from '@/types/api';
+
+export async function GET(): Promise<NextResponse<ApiResponse<User[]>>> {
+  const users = await apiClient.get<User[]>('user', '/users');
+  return NextResponse.json({ data: users, success: true });
+}
+
+export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<User>>> {
+  const dto = (await req.json()) as CreateUserRequest;
+  const newUser = await apiClient.post<User>('user', '/users', dto);
+  const { cacheUtils } = await import('@/lib/cache-utils');
+  cacheUtils.revalidateUserData();
+  return NextResponse.json({ data: newUser, success: true });
+}
+```
+
+---
+
+### 6 Example non‑cached route
+
+```typescript
+// src/app/api/auth/login/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { apiClient } from '@/lib/api-client';
+import type { LoginRequest, AuthResponse, ApiResponse } from '@/types/api';
+
+export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<AuthResponse>>> {
+  const credentials = (await req.json()) as LoginRequest;
+  const auth = await apiClient.post<AuthResponse>('auth', '/login', credentials);
+  return NextResponse.json({ data: auth, success: true });
+}
+```
+
+---
+
+### 7 Simple client‑side usage
+
+```tsx
+'use client';
+import { useEffect, useState } from 'react';
+import type { User, ApiResponse } from '@/types/api';
+
+export default function UserList() {
+  const [users, setUsers] = useState<User[]>([]);
+  useEffect(() => {
+    fetch('/api/users')
+      .then((r) => r.json())
+      .then((j: ApiResponse<User[]>) => j.success && setUsers(j.data));
+  }, []);
+  return <ul>{users.map((u) => <li key={u.id}>{u.name}</li>)}</ul>;
+}
+```
+
 
 ---
 
